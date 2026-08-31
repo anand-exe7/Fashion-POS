@@ -35,15 +35,16 @@ import {
   Printer,
 } from "lucide-react";
 import {
-  addProduct,
-  deleteProduct,
-  getOrders,
-  getProducts,
-  orderExists,
-  saveOrder,
-  updateProduct,
-} from "@/lib/store";
-import { verifyPasscode } from "@/app/pos/actions";
+  createProductAction,
+  deleteProductAction,
+  listOrdersAction,
+  listProductsAction,
+  orderExistsAction,
+  createOrderAction,
+  updateProductAction,
+  verifyPasscode,
+  logoutAction,
+} from "@/app/pos/actions";
 
 type CatalogItem = {
   id: string;
@@ -383,7 +384,8 @@ export default function POSBilling() {
     }
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    await logoutAction();
     sessionStorage.removeItem("pos_authorized");
     localStorage.removeItem("pos_authorized");
     sessionStorage.removeItem("pos_role");
@@ -397,7 +399,7 @@ export default function POSBilling() {
   const fetchData = async () => {
     setIsRefreshing(true);
     try {
-      const productsData = getProducts();
+      const productsData = await listProductsAction();
       const defaultCategories: CatalogItem[] = DEFAULT_CATALOG.filter(
         (d) =>
           !productsData.some(
@@ -415,8 +417,9 @@ export default function POSBilling() {
         })),
       ]);
 
+      const ordersData = await listOrdersAction();
       setOrders(
-        getOrders().map((o) => ({
+        ordersData.map((o) => ({
           id: o.id,
           customerName: o.customer_name || "Guest",
           customerPhone: o.customer_phone || "",
@@ -564,7 +567,7 @@ export default function POSBilling() {
     ]);
   };
 
-  const addToCatalog = () => {
+  const addToCatalog = async () => {
     if (!newCatName.trim()) return;
 
     const details = {
@@ -576,8 +579,8 @@ export default function POSBilling() {
     if (editingCatalogId) {
       // Seeded defaults are not stored yet, so editing one saves it for real.
       const saved = editingCatalogId.startsWith("default-")
-        ? addProduct(details)
-        : updateProduct(editingCatalogId, details);
+        ? await createProductAction(details)
+        : await updateProductAction(editingCatalogId, details);
 
       if (!saved) {
         console.error("Could not find catalog item to update", editingCatalogId);
@@ -604,7 +607,7 @@ export default function POSBilling() {
       return;
     }
 
-    const created = addProduct(details);
+    const created = await createProductAction(details);
 
     setCatalog([
       ...catalog,
@@ -628,9 +631,9 @@ export default function POSBilling() {
     setShowCatalogModal(false);
   };
 
-  const deleteFromCatalog = (id: string) => {
+  const deleteFromCatalog = async (id: string) => {
     if (!id.startsWith("default-")) {
-      deleteProduct(id);
+      await deleteProductAction(id);
     }
 
     setCatalog((prev) => prev.filter((c) => c.id !== id));
@@ -666,7 +669,7 @@ export default function POSBilling() {
           randStr += chars.charAt(Math.floor(Math.random() * chars.length));
         }
         const tempId = `INV-${currentYear}-${randStr}`;
-        if (!orders.some((o) => o.id === tempId) && !orderExists(tempId)) {
+        if (!orders.some((o) => o.id === tempId) && !(await orderExistsAction(tempId))) {
           newOrderId = tempId;
           isUnique = true;
         }
@@ -695,7 +698,7 @@ export default function POSBilling() {
     const itemsToSave = items;
     const createdAt = new Date().toISOString();
 
-    saveOrder({
+    await createOrderAction({
       id: newOrderId,
       customer_name: customerName || "Guest",
       customer_phone: customerPhone,
