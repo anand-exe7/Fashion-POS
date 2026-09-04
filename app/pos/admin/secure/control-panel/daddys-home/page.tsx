@@ -33,10 +33,14 @@ import {
   Shield,
   Lock,
   Printer,
+  Save,
+  AlertTriangle,
+  Loader2,
 } from "lucide-react";
 import {
   createProductAction,
   deleteProductAction,
+  deleteOrderAction,
   listOrdersAction,
   listProductsAction,
   orderExistsAction,
@@ -320,7 +324,9 @@ export default function POSBilling() {
   const [applyGST, setApplyGST] = useState<boolean>(false);
   const [gstPercentage, setGstPercentage] = useState<number>(5);
 
-  const [catalog, setCatalog] = useState<CatalogItem[]>([]);
+  // Seed with the built-in catalog so the picker is never empty, even if the
+  // products fetch is slow or fails (e.g. DB unreachable).
+  const [catalog, setCatalog] = useState<CatalogItem[]>(DEFAULT_CATALOG);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [editingCatalogId, setEditingCatalogId] = useState<string | null>(null);
   const [activeInvoiceId, setActiveInvoiceId] = useState<string | null>(null);
@@ -394,6 +400,14 @@ export default function POSBilling() {
     setPasscode("");
     setPasscodeError("");
     setIsAuthorized(false);
+  };
+
+  const selectTab = (tab: "billing" | "orders" | "analytics") => {
+    setActiveTab(tab);
+    // On mobile/tablet the sidebar is an overlay — close it after navigating.
+    if (typeof window !== "undefined" && window.innerWidth < 1024) {
+      setIsSidebarOpen(false);
+    }
   };
 
   const fetchData = async () => {
@@ -475,6 +489,21 @@ export default function POSBilling() {
   const [catalogTargetRowId, setCatalogTargetRowId] = useState<string | null>(
     null,
   );
+
+  // Generic "Are you sure?" confirmation dialog — reused for destructive actions.
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    confirmLabel: string;
+    onConfirm: () => void | Promise<void>;
+  } | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+
+  // Billing: "Save Order" persists to the database without the WhatsApp redirect.
+  const [isSavingOrder, setIsSavingOrder] = useState(false);
+  const [savedOrderId, setSavedOrderId] = useState<string | null>(null);
+  const [isSendingWhatsApp, setIsSendingWhatsApp] = useState(false);
+  const [deletingOrderId, setDeletingOrderId] = useState<string | null>(null);
 
   // Order search/filters state
   const [orderSearchId, setOrderSearchId] = useState("");
@@ -648,121 +677,117 @@ export default function POSBilling() {
   const gstAmount = applyGST ? afterDiscount * (gstPercentage / 100) : 0;
   const grandTotal = afterDiscount + gstAmount + deliveryFee;
 
-  const handleSendWhatsApp = async (appType: 'personal' | 'business' = 'personal') => {
-    if (!customerPhone || customerPhone.length !== 10) {
-      alert(
-        "Please enter a valid 10-digit mobile contact number to send the bill.",
-      );
-      return;
+  const randomInvoiceSuffix = () => {
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let randStr = "";
+    for (let i = 0; i < 5; i++) {
+      randStr += chars.charAt(Math.floor(Math.random() * chars.length));
     }
+    return randStr;
+  };
 
+  const generateOrderId = async () => {
     const currentYear = new Date().getFullYear();
-    let newOrderId = "";
-    let isUnique = false;
     let attempts = 0;
-
     try {
-      while (!isUnique && attempts < 10) {
-        const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        let randStr = "";
-        for (let i = 0; i < 5; i++) {
-          randStr += chars.charAt(Math.floor(Math.random() * chars.length));
-        }
-        const tempId = `INV-${currentYear}-${randStr}`;
-        if (!orders.some((o) => o.id === tempId) && !(await orderExistsAction(tempId))) {
-          newOrderId = tempId;
-          isUnique = true;
+      while (attempts < 10) {
+        const tempId = `INV-${currentYear}-${randomInvoiceSuffix()}`;
+        if (
+          !orders.some((o) => o.id === tempId) &&
+          !(await orderExistsAction(tempId))
+        ) {
+          return tempId;
         }
         attempts++;
       }
     } catch (err) {
       console.error("Error generating secure random invoice number:", err);
     }
+    return `INV-${currentYear}-${randomInvoiceSuffix()}`;
+  };
 
-    if (!newOrderId) {
-      const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-      let randStr = "";
-      for (let i = 0; i < 5; i++) {
-        randStr += chars.charAt(Math.floor(Math.random() * chars.length));
-      }
-      newOrderId = `INV-${currentYear}-${randStr}`;
-    }
-    // Strict validation: every single row must have a name and a price > 0
-    const hasInvalidItem = items.some(i => !i.name || i.name.trim() === "" || i.price === undefined || i.price <= 0);
-    
+  type OrderSnapshot = {
+    id: string;
+    subtotal: number;
+    discount: number;
+    applyGST: boolean;
+    gstPercentage: number;
+    gstAmount: number;
+    grandTotal: number;
+    customerPhone: string;
+  };
+
+  // Validates the current cart, writes the order to the database, updates local
+  // state and resets the form. Returns a snapshot for messaging, or null if the
+  // cart was invalid or the write failed.
+  const persistCurrentOrder = async (): Promise<OrderSnapshot | null> => {
+    // Strict validation: every row must have a name and a price > 0.
+    const hasInvalidItem = items.some(
+      (i) =>
+        !i.name ||
+        i.name.trim() === "" ||
+        i.price === undefined ||
+        i.price <= 0,
+    );
     if (hasInvalidItem || items.length === 0) {
-      alert("Please ensure all items have a valid name and a price greater than 0. Remove any empty rows before proceeding.");
-      return;
+      alert(
+        "Please ensure all items have a valid name and a price greater than 0. Remove any empty rows before proceeding.",
+      );
+      return null;
     }
 
+    const newOrderId = await generateOrderId();
     const itemsToSave = items;
     const createdAt = new Date().toISOString();
-
-    await createOrderAction({
+    const snapshot: OrderSnapshot = {
       id: newOrderId,
-      customer_name: customerName || "Guest",
-      customer_phone: customerPhone,
-      source: isOnline ? "ONLINE" : "OFFLINE",
-      status: "COMPLETED",
       subtotal,
-      discount_type: discountType === "percent" ? "PERCENT" : "FIXED",
-      discount_value: discountValue,
-      discount_amount: calculatedDiscount,
-      delivery_fee: deliveryFee,
-      grand_total: grandTotal,
-      cash_received: cashReceived,
-      created_at: createdAt,
-      order_items: [
-        ...itemsToSave.map((i) => ({
-          snapshot_name: i.name,
-          snapshot_desc: i.desc,
-          snapshot_price: i.price,
-          quantity: i.qty,
-        })),
-        ...(applyGST && gstAmount > 0
-          ? [
-              {
-                snapshot_name: `GST (${gstPercentage}%)`,
-                snapshot_desc: "",
-                snapshot_price: gstAmount,
-                quantity: 1,
-              },
-            ]
-          : []),
-      ],
-    });
+      discount: calculatedDiscount,
+      applyGST,
+      gstPercentage,
+      gstAmount,
+      grandTotal,
+      customerPhone,
+    };
 
-    const domain = window.location.origin;
-    const invoiceUrl = `${domain}/invoice/${newOrderId}`;
-
-    const shopEmoji = String.fromCodePoint(0x2728);
-    const checkEmoji = String.fromCodePoint(0x2705);
-    const tagEmoji = String.fromCodePoint(0x1F516);
-    const moneyEmoji = String.fromCodePoint(0x1F4B0);
-    const receiptEmoji = String.fromCodePoint(0x1F4E6);
-
-    let message = `${shopEmoji} *Daddy's Home* ${shopEmoji}\n\n`;
-    message += `${checkEmoji} Here are your invoice details!\n\n`;
-    
-    message += `*Subtotal:* ₹${subtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}\n`;
-    if (calculatedDiscount > 0) {
-      message += `*Discount Applied:* -₹${calculatedDiscount.toLocaleString(undefined, { minimumFractionDigits: 2 })}\n`;
-    }
-    if (applyGST && gstAmount > 0) {
-      message += `*GST (${gstPercentage}%):* ₹${gstAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}\n`;
-    }
-    
-    message += `\n${moneyEmoji} *Total Amount:* ₹${grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}\n\n`;
-    message += `${receiptEmoji} View and download your detailed digital receipt here:\n${invoiceUrl}`;
-
-    const encodedMessage = encodeURIComponent(message);
-    let whatsappUrl = `https://api.whatsapp.com/send/?phone=91${customerPhone}&text=${encodedMessage}`;
-
-    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-    if (isMobile) {
-      window.location.href = whatsappUrl;
-    } else {
-      window.open(whatsappUrl, "_blank");
+    try {
+      await createOrderAction({
+        id: newOrderId,
+        customer_name: customerName || "Guest",
+        customer_phone: customerPhone,
+        source: isOnline ? "ONLINE" : "OFFLINE",
+        status: "COMPLETED",
+        subtotal,
+        discount_type: discountType === "percent" ? "PERCENT" : "FIXED",
+        discount_value: discountValue,
+        discount_amount: calculatedDiscount,
+        delivery_fee: deliveryFee,
+        grand_total: grandTotal,
+        cash_received: cashReceived,
+        created_at: createdAt,
+        order_items: [
+          ...itemsToSave.map((i) => ({
+            snapshot_name: i.name,
+            snapshot_desc: i.desc,
+            snapshot_price: i.price,
+            quantity: i.qty,
+          })),
+          ...(applyGST && gstAmount > 0
+            ? [
+                {
+                  snapshot_name: `GST (${gstPercentage}%)`,
+                  snapshot_desc: "",
+                  snapshot_price: gstAmount,
+                  quantity: 1,
+                },
+              ]
+            : []),
+        ],
+      });
+    } catch (err) {
+      console.error("Error saving order:", err);
+      alert("Could not save this order. Please check your connection and try again.");
+      return null;
     }
 
     const newOrder: CompletedOrder = {
@@ -772,7 +797,17 @@ export default function POSBilling() {
       source: isOnline ? "ONLINE" : "OFFLINE",
       items: [
         ...itemsToSave,
-        ...(applyGST && gstAmount > 0 ? [{ id: Math.random().toString(), name: `GST (${gstPercentage}%)`, desc: "", price: gstAmount, qty: 1 }] : [])
+        ...(applyGST && gstAmount > 0
+          ? [
+              {
+                id: Math.random().toString(),
+                name: `GST (${gstPercentage}%)`,
+                desc: "",
+                price: gstAmount,
+                qty: 1,
+              },
+            ]
+          : []),
       ],
       subtotal,
       discount: calculatedDiscount,
@@ -787,7 +822,7 @@ export default function POSBilling() {
 
     setOrders((prev) => [newOrder, ...prev]);
 
-    // Reset Form
+    // Reset form
     setCustomerName("");
     setCustomerPhone("");
     setItems([{ id: "1", name: "", desc: "", price: 0, qty: 1 }]);
@@ -796,6 +831,106 @@ export default function POSBilling() {
     setCashReceived(0);
     setApplyGST(false);
     setGstPercentage(5);
+    setSelectedCoupon("none");
+
+    return snapshot;
+  };
+
+  // "Save Order" — persist to the database only, no WhatsApp redirect.
+  const handleSaveOrder = async () => {
+    if (isSavingOrder || isSendingWhatsApp) return;
+    setIsSavingOrder(true);
+    try {
+      const snap = await persistCurrentOrder();
+      if (snap) {
+        setSavedOrderId(snap.id);
+        window.setTimeout(() => setSavedOrderId(null), 5000);
+      }
+    } finally {
+      setIsSavingOrder(false);
+    }
+  };
+
+  const handleSendWhatsApp = async () => {
+    if (isSavingOrder || isSendingWhatsApp) return;
+    if (!customerPhone || customerPhone.length !== 10) {
+      alert(
+        "Please enter a valid 10-digit mobile contact number to send the bill.",
+      );
+      return;
+    }
+
+    setIsSendingWhatsApp(true);
+    let snap: OrderSnapshot | null = null;
+    try {
+      snap = await persistCurrentOrder();
+    } finally {
+      setIsSendingWhatsApp(false);
+    }
+    if (!snap) return;
+
+    const domain = window.location.origin;
+    const invoiceUrl = `${domain}/invoice/${snap.id}`;
+
+    const shopEmoji = String.fromCodePoint(0x2728);
+    const checkEmoji = String.fromCodePoint(0x2705);
+    const moneyEmoji = String.fromCodePoint(0x1f4b0);
+    const receiptEmoji = String.fromCodePoint(0x1f4e6);
+
+    let message = `${shopEmoji} *Daddy's Home* ${shopEmoji}\n\n`;
+    message += `${checkEmoji} Here are your invoice details!\n\n`;
+
+    message += `*Subtotal:* ₹${snap.subtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}\n`;
+    if (snap.discount > 0) {
+      message += `*Discount Applied:* -₹${snap.discount.toLocaleString(undefined, { minimumFractionDigits: 2 })}\n`;
+    }
+    if (snap.applyGST && snap.gstAmount > 0) {
+      message += `*GST (${snap.gstPercentage}%):* ₹${snap.gstAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}\n`;
+    }
+
+    message += `\n${moneyEmoji} *Total Amount:* ₹${snap.grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}\n\n`;
+    message += `${receiptEmoji} View and download your detailed digital receipt here:\n${invoiceUrl}`;
+
+    const encodedMessage = encodeURIComponent(message);
+    const whatsappUrl = `https://api.whatsapp.com/send/?phone=91${snap.customerPhone}&text=${encodedMessage}`;
+
+    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+    if (isMobile) {
+      window.location.href = whatsappUrl;
+    } else {
+      window.open(whatsappUrl, "_blank");
+    }
+  };
+
+  // Permanently delete an invoice — removes it from the database and, because
+  // every analytics figure is derived from `orders`, from the dashboard too.
+  const handleDeleteOrder = async (id: string) => {
+    setDeletingOrderId(id);
+    try {
+      await deleteOrderAction(id);
+      setOrders((prev) => prev.filter((o) => o.id !== id));
+      setActiveInvoiceId((prev) => (prev === id ? null : prev));
+      setSelectedOrder((prev) => (prev && prev.id === id ? null : prev));
+    } catch (err) {
+      console.error("Error deleting order:", err);
+      alert("Could not delete this invoice. Please try again.");
+      throw err;
+    } finally {
+      setDeletingOrderId(null);
+    }
+  };
+
+  const runConfirm = async () => {
+    if (!confirmDialog) return;
+    setConfirmBusy(true);
+    try {
+      await confirmDialog.onConfirm();
+      setConfirmDialog(null);
+    } catch {
+      // Keep the dialog open so the user can retry; the handler already alerted.
+    } finally {
+      setConfirmBusy(false);
+    }
   };
 
   // Real-time analytics derived from orders with period filtering
@@ -1448,9 +1583,12 @@ export default function POSBilling() {
         />
       )}
 
-      {/* Collapsible Left Sidebar */}
+      {/* Collapsible Left Sidebar. On mobile it is a fixed overlay drawer that
+          slides via transform only and snaps instantly (no transition — a
+          transitioned width/transform here can stall and leave the panel stuck
+          off-screen). On desktop it keeps the smooth collapse. */}
       <aside
-        className={`fixed lg:sticky top-0 bottom-0 left-0 bg-[#0F0F0F] text-[#FFFFFF] flex flex-col justify-between h-screen shrink-0 shadow-xl z-40 transition-all duration-300 ease-in-out ${isSidebarOpen ? "w-64 border-r border-white/10 translate-x-0" : "w-0 min-w-0 border-r-0 -translate-x-64 overflow-hidden"}`}
+        className={`fixed lg:sticky top-0 bottom-0 left-0 z-40 h-screen shrink-0 overflow-hidden bg-[#0F0F0F] text-[#FFFFFF] flex flex-col justify-between shadow-xl w-64 border-r border-white/10 lg:transition-all lg:duration-300 lg:ease-in-out ${isSidebarOpen ? "translate-x-0 lg:w-64" : "-translate-x-full lg:w-0 lg:border-r-0 lg:translate-x-0"}`}
       >
         <div className="w-64 flex flex-col justify-between h-full shrink-0 overflow-hidden relative">
           <div className="flex flex-col">
@@ -1484,7 +1622,7 @@ export default function POSBilling() {
             {/* Navigation Links */}
             <nav className="px-4 py-6 space-y-2">
               <button
-                onClick={() => setActiveTab("billing")}
+                onClick={() => selectTab("billing")}
                 className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-xl font-bold text-xs uppercase tracking-wider transition-all cursor-pointer ${
                   activeTab === "billing"
                     ? "bg-[#FFFFFF] text-[#C1272D] shadow-lg scale-102"
@@ -1497,7 +1635,7 @@ export default function POSBilling() {
               {role === 'admin' && (
                 <>
                   <button
-                    onClick={() => setActiveTab("orders")}
+                    onClick={() => selectTab("orders")}
                     className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-xl font-bold text-xs uppercase tracking-wider transition-all cursor-pointer ${
                       activeTab === "orders"
                         ? "bg-[#FFFFFF] text-[#C1272D] shadow-lg scale-102"
@@ -1508,7 +1646,7 @@ export default function POSBilling() {
                     Order History
                   </button>
                   <button
-                    onClick={() => setActiveTab("analytics")}
+                    onClick={() => selectTab("analytics")}
                     className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-xl font-bold text-xs uppercase tracking-wider transition-all cursor-pointer ${
                       activeTab === "analytics"
                         ? "bg-[#FFFFFF] text-[#C1272D] shadow-lg scale-102"
@@ -1549,15 +1687,16 @@ export default function POSBilling() {
         {/* Global Top Navbar */}
         <header className="flex-shrink-0 flex flex-col sm:flex-row justify-between items-start sm:items-center py-4 border-b border-black/10 w-full mb-6 gap-4">
           <div className="flex items-center gap-4">
-            {!isSidebarOpen && (
-              <button
-                onClick={() => setIsSidebarOpen(true)}
-                className="w-9 h-9 bg-white border border-black/10 hover:bg-[#FFFFFF]/40 rounded-lg flex items-center justify-center transition-all shadow-sm cursor-pointer"
-                title="Open Menu"
-              >
-                <Menu className="w-4.5 h-4.5 text-[#C1272D]" />
-              </button>
-            )}
+            {/* Always available on mobile/tablet; on desktop only when the
+                sidebar is collapsed. */}
+            <button
+              onClick={() => setIsSidebarOpen((v) => !v)}
+              className={`w-9 h-9 bg-white border border-black/10 hover:bg-[#F5EFE6] rounded-lg flex items-center justify-center transition-colors shadow-sm cursor-pointer shrink-0 ${isSidebarOpen ? "lg:hidden" : ""}`}
+              title={isSidebarOpen ? "Close menu" : "Open menu"}
+              aria-label="Toggle menu"
+            >
+              <Menu className="w-5 h-5 text-[#C1272D]" />
+            </button>
             <div>
               <h1 className="text-lg font-black text-[#000000] tracking-tight ">
                 Daddy's Home
@@ -1819,9 +1958,12 @@ export default function POSBilling() {
                                             <button
                                               onClick={(e) => {
                                                 e.stopPropagation();
-                                                if (window.confirm("Are you sure you want to delete this item from the catalog?")) {
-                                                  deleteFromCatalog(catItem.id);
-                                                }
+                                                setConfirmDialog({
+                                                  title: "Delete catalog item?",
+                                                  message: `"${catItem.name}" will be removed from the catalog. This won't affect invoices that already use it.`,
+                                                  confirmLabel: "Delete item",
+                                                  onConfirm: () => deleteFromCatalog(catItem.id),
+                                                });
                                               }}
                                               className="px-3 py-2.5 text-[#000000] hover:text-[#C1272D] transition-colors cursor-pointer"
                                               title="Delete item"
@@ -1834,7 +1976,9 @@ export default function POSBilling() {
                                   ) : (
                                     <div className="px-4 py-4 text-center">
                                       <div className="text-xs text-[#000000] font-semibold mb-2">
-                                        No items match "{catalogSearch}"
+                                        {catalogSearch.trim()
+                                          ? `No items match "${catalogSearch}"`
+                                          : "No catalog items yet"}
                                       </div>
                                       <button
                                         onClick={() => {
@@ -2163,19 +2307,45 @@ export default function POSBilling() {
                       </div>
                     )}
 
-                    {/* Send Bill Button */}
+                    {/* Saved confirmation */}
+                    {savedOrderId && (
+                      <div className="flex items-center gap-2 bg-[#10B981]/10 border border-[#10B981]/30 text-[#059669] rounded-lg p-3 text-[11px] font-bold">
+                        <ShieldCheck className="w-4 h-4 shrink-0" />
+                        Order {savedOrderId} saved to the database.
+                      </div>
+                    )}
+
+                    {/* Action Buttons */}
                     <button
-                      onClick={() => handleSendWhatsApp('business')}
-                      className="w-full mt-2 bg-[#10B981] hover:bg-[#059669] text-white py-3 rounded-lg font-bold text-[10px] uppercase tracking-[0.1em] flex items-center justify-center gap-2 transition-transform active:scale-[0.98] shadow-[0_4px_14px_rgba(16,185,129,0.4)] cursor-pointer"
+                      onClick={handleSendWhatsApp}
+                      disabled={isSendingWhatsApp || isSavingOrder}
+                      className="w-full mt-2 bg-[#10B981] hover:bg-[#059669] text-white py-3 rounded-lg font-bold text-[10px] uppercase tracking-[0.1em] flex items-center justify-center gap-2 transition-transform active:scale-[0.98] shadow-[0_4px_14px_rgba(16,185,129,0.4)] cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
                     >
-                      <svg
-                        className="w-3.5 h-3.5"
-                        viewBox="0 0 24 24"
-                        fill="currentColor"
-                      >
-                        <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51a12.8 12.8 0 0 0-.57-.012c-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413Z" />
-                      </svg>
-                      Send Bill Via WhatsApp
+                      {isSendingWhatsApp ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <svg
+                          className="w-3.5 h-3.5"
+                          viewBox="0 0 24 24"
+                          fill="currentColor"
+                        >
+                          <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51a12.8 12.8 0 0 0-.57-.012c-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413Z" />
+                        </svg>
+                      )}
+                      {isSendingWhatsApp ? "Saving…" : "Send Bill Via WhatsApp"}
+                    </button>
+
+                    <button
+                      onClick={handleSaveOrder}
+                      disabled={isSavingOrder || isSendingWhatsApp}
+                      className="w-full mt-2 bg-white hover:bg-[#F5EFE6] text-[#000000] border border-black/15 py-3 rounded-lg font-bold text-[10px] uppercase tracking-[0.1em] flex items-center justify-center gap-2 transition-transform active:scale-[0.98] shadow-sm cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+                    >
+                      {isSavingOrder ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Save className="w-3.5 h-3.5 text-[#C1272D]" />
+                      )}
+                      {isSavingOrder ? "Saving…" : "Save Order Only"}
                     </button>
                   </div>
                 </div>
@@ -2431,6 +2601,25 @@ export default function POSBilling() {
                                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                                     </svg>
                                     Invoice
+                                  </button>
+                                  <button
+                                    onClick={() =>
+                                      setConfirmDialog({
+                                        title: "Delete this invoice?",
+                                        message: `Invoice ${order.id} for ${order.customerName || "Guest"} (₹${order.grandTotal.toLocaleString()}) will be permanently deleted from the database and removed from every analytics report. This cannot be undone.`,
+                                        confirmLabel: "Delete invoice",
+                                        onConfirm: () => handleDeleteOrder(order.id),
+                                      })
+                                    }
+                                    disabled={deletingOrderId === order.id}
+                                    className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-[#C1272D]/40 text-[#C1272D] hover:bg-[#C1272D] hover:text-white rounded-md text-[9px] font-bold uppercase tracking-wider transition-colors whitespace-nowrap cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                                  >
+                                    {deletingOrderId === order.id ? (
+                                      <Loader2 className="w-3 h-3 animate-spin" />
+                                    ) : (
+                                      <Trash2 className="w-3 h-3" />
+                                    )}
+                                    Delete
                                   </button>
                                 </div>
                               </td>
@@ -3657,7 +3846,7 @@ export default function POSBilling() {
         {/* Classy Footer */}
         <footer className="mt-auto pt-10 pb-2 border-t border-black/10 flex flex-col md:flex-row justify-between items-center text-[10px] text-[#000000] font-semibold uppercase tracking-wider gap-4">
           <div className="text-[#000000]">
-            © 2026 All Rights Reserved. Daddy'"'"'s Home.
+            &copy; 2026 All Rights Reserved. Daddy&apos;s Home.
           </div>
           <div>
             Powered By{" "}
@@ -3669,7 +3858,7 @@ export default function POSBilling() {
             >
               Cenexa Systems
             </a>{" "}
-            @2026
+            &middot; 2026
           </div>
           <div className="italic text-[#6B5F52] font-bold tracking-[0.15em] flex items-center gap-1.5">
             <span className="w-1 h-1 bg-[#C1272D] rounded-full"></span>
@@ -3683,23 +3872,94 @@ export default function POSBilling() {
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[200] flex items-center justify-center p-2 sm:p-4 animate-in fade-in duration-200">
           <div className="bg-[#F5EFE6] rounded-2xl shadow-2xl w-full max-w-4xl h-[90vh] sm:h-[85vh] flex flex-col overflow-hidden transform scale-100 animate-in zoom-in-95 duration-200">
             <div className="px-4 py-3 flex justify-between items-center bg-white border-b border-black/10 shrink-0">
-              <h3 className="font-bold text-sm uppercase tracking-wider flex items-center gap-2 text-[#000000]">
-                <Printer className="w-4 h-4 text-[#C1272D]" />
-                Invoice #{activeInvoiceId}
+              <h3 className="font-bold text-sm uppercase tracking-wider flex items-center gap-2 text-[#000000] truncate">
+                <Printer className="w-4 h-4 text-[#C1272D] shrink-0" />
+                <span className="truncate">Invoice #{activeInvoiceId}</span>
               </h3>
-              <button
-                onClick={() => setActiveInvoiceId(null)}
-                className="w-8 h-8 flex items-center justify-center bg-black hover:bg-black/80 text-white rounded-md transition-colors cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-2 shrink-0">
+                {role === "admin" && (
+                  <button
+                    onClick={() => {
+                      const id = activeInvoiceId;
+                      if (!id) return;
+                      setConfirmDialog({
+                        title: "Delete this invoice?",
+                        message: `Invoice ${id} will be permanently deleted from the database and removed from every analytics report. This cannot be undone.`,
+                        confirmLabel: "Delete invoice",
+                        onConfirm: () => handleDeleteOrder(id),
+                      });
+                    }}
+                    disabled={deletingOrderId === activeInvoiceId}
+                    className="flex items-center gap-1.5 px-3 h-8 bg-white border border-[#C1272D]/40 text-[#C1272D] hover:bg-[#C1272D] hover:text-white rounded-md text-[10px] font-bold uppercase tracking-wider transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {deletingOrderId === activeInvoiceId ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Trash2 className="w-3.5 h-3.5" />
+                    )}
+                    Delete
+                  </button>
+                )}
+                <button
+                  onClick={() => setActiveInvoiceId(null)}
+                  className="w-8 h-8 flex items-center justify-center bg-black hover:bg-black/80 text-white rounded-md transition-colors cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
             <div className="flex-1 w-full bg-[#F5EFE6] overflow-hidden relative">
-              <iframe 
-                src={`/invoice/${activeInvoiceId}`} 
+              <iframe
+                src={`/invoice/${activeInvoiceId}`}
                 className="w-full h-full border-none absolute inset-0"
                 title={`Invoice ${activeInvoiceId}`}
               />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Dialog ("Are you sure?") */}
+      {confirmDialog && (
+        <div
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[300] flex items-center justify-center p-4 animate-in fade-in duration-150"
+          onClick={() => {
+            if (!confirmBusy) setConfirmDialog(null);
+          }}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-[0_20px_60px_rgba(0,0,0,0.4)] w-full max-w-sm overflow-hidden animate-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-6 pt-6 pb-4 flex items-start gap-4">
+              <div className="w-11 h-11 rounded-full bg-[#C1272D]/10 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-5 h-5 text-[#C1272D]" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-base font-black text-[#000000] tracking-tight">
+                  {confirmDialog.title}
+                </h3>
+                <p className="text-[13px] font-medium text-[#4A4038] mt-1.5 leading-relaxed">
+                  {confirmDialog.message}
+                </p>
+              </div>
+            </div>
+            <div className="px-6 py-4 bg-[#F5EFE6]/60 border-t border-black/10 flex justify-end gap-3">
+              <button
+                onClick={() => setConfirmDialog(null)}
+                disabled={confirmBusy}
+                className="px-4 py-2 rounded-lg text-xs font-bold uppercase tracking-wider text-[#000000] bg-white border border-black/15 hover:bg-[#F5EFE6] transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={runConfirm}
+                disabled={confirmBusy}
+                className="px-4 py-2 rounded-lg text-xs font-bold uppercase tracking-wider text-white bg-[#C1272D] hover:bg-[#9E1B20] transition-colors cursor-pointer flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {confirmBusy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                {confirmBusy ? "Working…" : confirmDialog.confirmLabel}
+              </button>
             </div>
           </div>
         </div>

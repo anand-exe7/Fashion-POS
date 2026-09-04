@@ -72,3 +72,9 @@ export async function createOrderAction(order: StoredOrder) {
   await db.saveOrder(order);
   revalidatePath(`/invoice/${order.id}`);
 }
+
+export async function deleteOrderAction(id: string) {
+  await requireAdmin();
+  await db.deleteOrder(id);
+  revalidatePath(`/invoice/${id}`);
+}

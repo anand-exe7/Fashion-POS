@@ -174,3 +174,9 @@ export async function saveOrder(order: StoredOrder): Promise<void> {
   const { error } = await sb.rpc("create_order", { payload: order });
   if (error) throw error;
 }
+
+export async function deleteOrder(id: string): Promise<void> {
+  // order_items is ON DELETE CASCADE, so this clears the invoice everywhere.
+  const { error } = await sb.from("orders").delete().eq("id", id);
+  if (error) throw error;
+}
