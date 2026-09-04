@@ -37,6 +37,7 @@ import {
   AlertTriangle,
   Loader2,
 } from "lucide-react";
+import InstallAppButton from "@/app/install-app-button";
 import {
   createProductAction,
   deleteProductAction,
@@ -57,16 +58,8 @@ type CatalogItem = {
   price?: number;
 };
 
-const DEFAULT_CATALOG: CatalogItem[] = [
-  { id: "default-shirt", name: "Shirt", desc: "MENSWEAR" },
-  { id: "default-cotton-pant", name: "Cotton Pant", desc: "MENSWEAR" },
-  { id: "default-jean-pant", name: "Jean Pant", desc: "MENSWEAR" },
-  { id: "default-t-shirt", name: "T-Shirt", desc: "MENSWEAR" },
-  { id: "default-premium-t-shirt", name: "Premium T-Shirt", desc: "MENSWEAR" },
-  { id: "default-track-pant", name: "Track Pant", desc: "MENSWEAR" },
-  { id: "default-cap", name: "Cap", desc: "ACCESSORIES" },
-  { id: "default-bracelet", name: "Bracelet", desc: "ACCESSORIES" },
-];
+// The catalog lives entirely in the `products` table — the built-in items were
+// seeded there by migration 0002_seed_default_products.sql.
 
 type OrderItem = {
   id: string;
@@ -324,9 +317,10 @@ export default function POSBilling() {
   const [applyGST, setApplyGST] = useState<boolean>(false);
   const [gstPercentage, setGstPercentage] = useState<number>(5);
 
-  // Seed with the built-in catalog so the picker is never empty, even if the
-  // products fetch is slow or fails (e.g. DB unreachable).
-  const [catalog, setCatalog] = useState<CatalogItem[]>(DEFAULT_CATALOG);
+  const [catalog, setCatalog] = useState<CatalogItem[]>([]);
+  // Distinguishes "still loading" from "genuinely empty", so the picker never
+  // flashes a misleading `No items match ""` before the fetch lands.
+  const [isCatalogLoading, setIsCatalogLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [editingCatalogId, setEditingCatalogId] = useState<string | null>(null);
   const [activeInvoiceId, setActiveInvoiceId] = useState<string | null>(null);
@@ -414,22 +408,14 @@ export default function POSBilling() {
     setIsRefreshing(true);
     try {
       const productsData = await listProductsAction();
-      const defaultCategories: CatalogItem[] = DEFAULT_CATALOG.filter(
-        (d) =>
-          !productsData.some(
-            (p) => (p.name || "").trim().toLowerCase() === d.name.toLowerCase(),
-          ),
-      );
-
-      setCatalog([
-        ...defaultCategories,
-        ...productsData.map((p) => ({
+      setCatalog(
+        productsData.map((p) => ({
           id: p.id,
           name: p.name,
           desc: p.description,
           price: p.default_price || undefined,
         })),
-      ]);
+      );
 
       const ordersData = await listOrdersAction();
       setOrders(
@@ -462,6 +448,7 @@ export default function POSBilling() {
       console.error("Error refreshing data:", err);
     } finally {
       setIsRefreshing(false);
+      setIsCatalogLoading(false);
     }
   };
 
@@ -606,10 +593,7 @@ export default function POSBilling() {
     };
 
     if (editingCatalogId) {
-      // Seeded defaults are not stored yet, so editing one saves it for real.
-      const saved = editingCatalogId.startsWith("default-")
-        ? await createProductAction(details)
-        : await updateProductAction(editingCatalogId, details);
+      const saved = await updateProductAction(editingCatalogId, details);
 
       if (!saved) {
         console.error("Could not find catalog item to update", editingCatalogId);
@@ -661,10 +645,9 @@ export default function POSBilling() {
   };
 
   const deleteFromCatalog = async (id: string) => {
-    if (!id.startsWith("default-")) {
-      await deleteProductAction(id);
-    }
-
+    // Only drop it from the UI once the database write has actually succeeded,
+    // so a failure can't leave the screen disagreeing with the catalog.
+    await deleteProductAction(id);
     setCatalog((prev) => prev.filter((c) => c.id !== id));
   };
 
@@ -1702,6 +1685,7 @@ export default function POSBilling() {
                 Daddy's Home
               </h1>
             </div>
+            <InstallAppButton />
           </div>
 
           {/* OFFLINE / ONLINE Toggle (only shown when billing tab is active) */}
@@ -1975,10 +1959,17 @@ export default function POSBilling() {
                                       ))
                                   ) : (
                                     <div className="px-4 py-4 text-center">
-                                      <div className="text-xs text-[#000000] font-semibold mb-2">
-                                        {catalogSearch.trim()
-                                          ? `No items match "${catalogSearch}"`
-                                          : "No catalog items yet"}
+                                      <div className="text-xs text-[#000000] font-semibold mb-2 flex items-center justify-center gap-2">
+                                        {isCatalogLoading ? (
+                                          <>
+                                            <Loader2 className="w-3.5 h-3.5 animate-spin text-[#C1272D]" />
+                                            Loading catalog…
+                                          </>
+                                        ) : catalogSearch.trim() ? (
+                                          `No items match "${catalogSearch}"`
+                                        ) : (
+                                          "No catalog items yet"
+                                        )}
                                       </div>
                                       <button
                                         onClick={() => {
@@ -1987,7 +1978,7 @@ export default function POSBilling() {
                                           setShowCatalogModal(true);
                                           setActiveCatalogRowId(null);
                                         }}
-                                        className="text-[10px] font-bold text-[#C1272D] bg-[#C1272D]/10 hover:bg-[#C1272D]/20 px-3 py-1.5 rounded uppercase tracking-wider transition-colors cursor-pointer"
+                                        className={`text-[10px] font-bold text-[#C1272D] bg-[#C1272D]/10 hover:bg-[#C1272D]/20 px-3 py-1.5 rounded uppercase tracking-wider transition-colors cursor-pointer ${isCatalogLoading ? "hidden" : ""}`}
                                       >
                                         + Add to Catalog
                                       </button>
@@ -2580,13 +2571,13 @@ export default function POSBilling() {
                                 ₹{order.grandTotal.toLocaleString()}
                               </td>
                               <td className="p-4 text-right">
-                                <div className="flex flex-col sm:flex-row items-end sm:items-center justify-end gap-2 sm:gap-3">
+                                <div className="flex flex-row items-center justify-end gap-2 sm:gap-3">
                                   <span className="px-3 py-1 rounded bg-[#10B981]/10 text-[#10B981] text-[10px] font-bold uppercase tracking-wider hidden sm:inline-block">
                                     {order.status}
                                   </span>
                                   <button
                                     onClick={() => resendWhatsApp(order)}
-                                    className="flex items-center gap-1.5 px-3 py-1.5 bg-[#10B981] hover:bg-[#059669] text-white rounded-md text-[9px] font-bold uppercase tracking-wider transition-colors whitespace-nowrap"
+                                    className="flex items-center gap-1.5 px-3 py-1.5 bg-[#10B981] hover:bg-[#059669] text-white rounded-md text-[9px] font-bold uppercase tracking-wider transition-colors whitespace-nowrap shrink-0"
                                   >
                                     <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor">
                                       <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51a12.8 12.8 0 0 0-.57-.012c-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413Z" />
@@ -2595,7 +2586,7 @@ export default function POSBilling() {
                                   </button>
                                   <button
                                     onClick={() => setActiveInvoiceId(order.id)}
-                                    className="flex items-center gap-1.5 px-3 py-1.5 bg-[#C1272D] hover:bg-[#C1272D] text-white rounded-md text-[9px] font-bold uppercase tracking-wider transition-colors whitespace-nowrap cursor-pointer"
+                                    className="flex items-center gap-1.5 px-3 py-1.5 bg-[#C1272D] hover:bg-[#C1272D] text-white rounded-md text-[9px] font-bold uppercase tracking-wider transition-colors whitespace-nowrap cursor-pointer shrink-0"
                                   >
                                     <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
@@ -2612,7 +2603,7 @@ export default function POSBilling() {
                                       })
                                     }
                                     disabled={deletingOrderId === order.id}
-                                    className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-[#C1272D]/40 text-[#C1272D] hover:bg-[#C1272D] hover:text-white rounded-md text-[9px] font-bold uppercase tracking-wider transition-colors whitespace-nowrap cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                                    className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-[#C1272D]/40 text-[#C1272D] hover:bg-[#C1272D] hover:text-white rounded-md text-[9px] font-bold uppercase tracking-wider transition-colors whitespace-nowrap cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
                                   >
                                     {deletingOrderId === order.id ? (
                                       <Loader2 className="w-3 h-3 animate-spin" />
