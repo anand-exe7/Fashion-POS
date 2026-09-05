@@ -291,12 +291,27 @@ const SearchableItemInput = ({
 };
 
 export default function POSBilling() {
-  const [isAuthorized, setIsAuthorized] = useState<boolean>(false);
-  const [role, setRole] = useState<'staff' | 'admin' | null>(null);
+  const [isAuthorized, setIsAuthorized] = useState<boolean>(() => {
+    if (typeof window !== "undefined") {
+      return (
+        sessionStorage.getItem("pos_authorized") === "true" ||
+        localStorage.getItem("pos_authorized") === "true"
+      );
+    }
+    return false;
+  });
+  const [role, setRole] = useState<'staff' | 'admin' | null>(() => {
+    if (typeof window !== "undefined") {
+      const stored =
+        sessionStorage.getItem("pos_role") ||
+        localStorage.getItem("pos_role");
+      return (stored as 'staff' | 'admin') || null;
+    }
+    return null;
+  });
   const [passcode, setPasscode] = useState<string>("");
   const [passcodeError, setPasscodeError] = useState<string>("");
   const [showPasscode, setShowPasscode] = useState<boolean>(false);
-  const [isCheckingAuth, setIsCheckingAuth] = useState<boolean>(true);
 
   const [activeCategory, setActiveCategory] = useState<string>("ALL");
   const [activeTab, setActiveTab] = useState<
@@ -364,7 +379,6 @@ export default function POSBilling() {
       }
       setIsAuthorized(true);
     }
-    setIsCheckingAuth(false);
   }, []);
 
   const handleVerifyPasscode = async (e?: React.FormEvent) => {
@@ -1228,18 +1242,6 @@ export default function POSBilling() {
       : "None";
   const topProduct = topItems[0]?.name || "None";
 
-  if (isCheckingAuth) {
-    return (
-      <div className="min-h-screen bg-[#F5EFE6] flex items-center justify-center font-sans">
-        <div className="flex flex-col items-center gap-3">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#C1272D]"></div>
-          <span className="text-xs text-[#000000] font-bold uppercase tracking-wider">
-            Verifying Session...
-          </span>
-        </div>
-      </div>
-    );
-  }
 
   if (!isAuthorized) {
     return (
