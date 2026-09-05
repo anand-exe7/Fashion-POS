@@ -53,6 +53,7 @@ export default async function InvoicePage({
           <div className="w-24 h-24 flex items-center justify-center mb-4">
             <img
               src="/logo.jpg"
+              src="/logo.png"
               alt="Daddy's Home Logo"
               className="max-w-full max-h-full object-contain"
             />
