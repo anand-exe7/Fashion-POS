@@ -291,6 +291,7 @@ const SearchableItemInput = ({
 };
 
 export default function POSBilling() {
+  const [isMounted, setIsMounted] = useState(false);
   const [isAuthorized, setIsAuthorized] = useState<boolean>(() => {
     if (typeof window !== "undefined") {
       return (
@@ -379,6 +380,7 @@ export default function POSBilling() {
       }
       setIsAuthorized(true);
     }
+    setIsMounted(true);
   }, []);
 
   const handleVerifyPasscode = async (e?: React.FormEvent) => {
@@ -1242,6 +1244,9 @@ export default function POSBilling() {
       : "None";
   const topProduct = topItems[0]?.name || "None";
 
+  if (!isMounted) {
+    return <div className="min-h-screen bg-[#F5EFE6]" />;
+  }
 
   if (!isAuthorized) {
     return (
