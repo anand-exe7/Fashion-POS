@@ -6,8 +6,8 @@ export default function manifest(): MetadataRoute.Manifest {
     name: "Daddy's Home POS",
     short_name: "DH POS",
     description: "Billing terminal and order dashboard for Daddy's Home.",
-    // Open straight into the billing terminal rather than the public store page.
-    start_url: "/pos/admin/secure/control-panel/daddys-home",
+    // Open straight into the billing terminal on the root page.
+    start_url: "/",
     scope: "/",
     display: "standalone",
     orientation: "any",
