@@ -83,6 +83,7 @@ type CompletedOrder = {
   deliveryFee: number;
   grandTotal: number;
   cashReceived: number;
+  paymentMethod?: "CASH" | "CARD" | "GPAY";
   date: string;
   status: "Completed" | "Pending";
 };
@@ -330,6 +331,7 @@ export default function POSBilling() {
     "fixed",
   );
   const [deliveryFee, setDeliveryFee] = useState<number>(0);
+  const [paymentMethod, setPaymentMethod] = useState<"CASH" | "CARD" | "GPAY">("CASH");
   const [cashReceived, setCashReceived] = useState<number>(0);
   const [applyGST, setApplyGST] = useState<boolean>(false);
   const [gstPercentage, setGstPercentage] = useState<number>(5);
@@ -438,30 +440,43 @@ export default function POSBilling() {
 
       const ordersData = await listOrdersAction();
       setOrders(
-        ordersData.map((o) => ({
-          id: o.id,
-          customerName: o.customer_name || "Guest",
-          customerPhone: o.customer_phone || "",
-          source: o.source,
-          items: o.order_items.map((i, idx) => ({
-            id: `${o.id}-${idx}`,
-            name: i.snapshot_name,
-            desc: i.snapshot_desc || "",
-            price: i.snapshot_price,
-            qty: i.quantity,
-          })),
-          subtotal: o.subtotal,
-          discount: o.discount_amount,
-          discountType: o.discount_type,
-          discountValue: o.discount_value,
-          deliveryFee: o.delivery_fee,
-          grandTotal: o.grand_total,
-          cashReceived: o.cash_received,
-          date: o.created_at,
-          status: (o.status === "COMPLETED" ? "Completed" : "Pending") as
-            | "Completed"
-            | "Pending",
-        })),
+        ordersData.map((o) => {
+          let phone = o.customer_phone || "";
+          let method: "CASH" | "CARD" | "GPAY" = "CASH";
+          if (phone.includes("_")) {
+            const parts = phone.split("_");
+            phone = parts[0];
+            const pm = parts[1];
+            if (pm === "CARD" || pm === "GPAY") {
+              method = pm;
+            }
+          }
+          return {
+            id: o.id,
+            customerName: o.customer_name || "Guest",
+            customerPhone: phone,
+            source: o.source,
+            items: o.order_items.map((i, idx) => ({
+              id: `${o.id}-${idx}`,
+              name: i.snapshot_name,
+              desc: i.snapshot_desc || "",
+              price: i.snapshot_price,
+              qty: i.quantity,
+            })),
+            subtotal: o.subtotal,
+            discount: o.discount_amount,
+            discountType: o.discount_type,
+            discountValue: o.discount_value,
+            deliveryFee: o.delivery_fee,
+            grandTotal: o.grand_total,
+            cashReceived: o.cash_received,
+            paymentMethod: method,
+            date: o.created_at,
+            status: (o.status === "COMPLETED" ? "Completed" : "Pending") as
+              | "Completed"
+              | "Pending",
+          };
+        }),
       );
     } catch (err) {
       console.error("Error refreshing data:", err);
@@ -730,6 +745,7 @@ export default function POSBilling() {
     gstPercentage: number;
     gstAmount: number;
     grandTotal: number;
+    paymentMethod?: "CASH" | "CARD" | "GPAY";
   };
 
   // Validates the current cart, writes the order to the database, updates local
@@ -764,13 +780,17 @@ export default function POSBilling() {
       gstPercentage,
       gstAmount,
       grandTotal,
+      paymentMethod,
     };
+
+    const phoneToSave = customerPhone ? `${customerPhone}_${paymentMethod}` : `_${paymentMethod}`;
+    const actualCashReceived = paymentMethod === "CASH" ? cashReceived : grandTotal;
 
     try {
       await createOrderAction({
         id: newOrderId,
         customer_name: customerName || "Guest",
-        customer_phone: customerPhone,
+        customer_phone: phoneToSave,
         source: isOnline ? "ONLINE" : "OFFLINE",
         status: "COMPLETED",
         subtotal,
@@ -779,7 +799,7 @@ export default function POSBilling() {
         discount_amount: calculatedDiscount,
         delivery_fee: deliveryFee,
         grand_total: grandTotal,
-        cash_received: cashReceived,
+        cash_received: actualCashReceived,
         created_at: createdAt,
         order_items: [
           ...itemsToSave.map((i) => ({
@@ -831,7 +851,8 @@ export default function POSBilling() {
       discountValue: discountValue,
       deliveryFee,
       grandTotal,
-      cashReceived,
+      cashReceived: actualCashReceived,
+      paymentMethod,
       date: createdAt,
       status: "Completed",
     };
@@ -845,6 +866,7 @@ export default function POSBilling() {
     setDiscountValue(0);
     setDeliveryFee(0);
     setCashReceived(0);
+    setPaymentMethod("CASH");
     setApplyGST(false);
     setGstPercentage(5);
     setSelectedCoupon("none");
@@ -879,8 +901,14 @@ export default function POSBilling() {
       message += `*GST (${snap.gstPercentage}%):* ₹${snap.gstAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}\n`;
     }
 
-    message += `\n${moneyEmoji} *Total Amount:* ₹${snap.grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}\n\n`;
-    message += `${receiptEmoji} View and download your detailed digital receipt here:\n${invoiceUrl}`;
+    message += `\n${moneyEmoji} *Total Amount:* ₹${snap.grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}\n`;
+    
+    if (snap.paymentMethod) {
+      const modeEmoji = snap.paymentMethod === "CASH" ? "💵" : snap.paymentMethod === "CARD" ? "💳" : "📱";
+      const modeText = snap.paymentMethod === "GPAY" ? "GPay (UPI)" : snap.paymentMethod === "CARD" ? "Card" : "Cash";
+      message += `${modeEmoji} *Payment Mode:* ${modeText}\n`;
+    }
+    message += `\n${receiptEmoji} View and download your detailed digital receipt here:\n${invoiceUrl}`;
 
     const encodedMessage = encodeURIComponent(message);
     const whatsappUrl = `https://api.whatsapp.com/send/?phone=91${cleanPhone}&text=${encodedMessage}`;
@@ -2333,44 +2361,79 @@ export default function POSBilling() {
                       </span>
                     </div>
 
-                    {/* Cash Payment */}
-                    <div className="bg-[#FFFFFF]/40 border border-black/10 rounded-xl p-4 mt-2">
-                      <span className="block text-[9px] font-bold text-[#000000] uppercase tracking-wider mb-0.5">
-                        Cash Payment
+                    {/* Payment Method Selector */}
+                    <div className="mt-4">
+                      <span className="block text-[10px] font-bold text-[#6B5F52] uppercase tracking-wider mb-2">
+                        Payment Method
                       </span>
-                      <label className="block text-[10px] font-bold text-[#000000] mb-2.5">
-                        Amount Received (₹)
-                      </label>
-                      <input
-                        type="number"
-                        className="w-full bg-white border border-black/10 focus:border-[#C1272D] rounded-lg px-3 py-2 text-base font-bold text-[#000000] placeholder:text-[#000000] focus:outline-none transition-colors"
-                        value={cashReceived || ""}
-                        onWheel={(e) => e.currentTarget.blur()}
-                        onChange={(e) =>
-                          setCashReceived(parseFloat(e.target.value) || 0)
-                        }
-                        placeholder="0.00"
-                      />
+                      <div className="flex bg-[#E0D5C3]/30 p-1 rounded-lg">
+                        <button
+                          onClick={() => setPaymentMethod("CASH")}
+                          className={`flex-1 flex items-center justify-center py-2 text-xs font-bold rounded-md transition-all ${paymentMethod === "CASH" ? "bg-white text-[#C1272D] shadow-sm" : "text-[#4A4038] hover:text-[#000000]"}`}
+                        >
+                          Cash
+                        </button>
+                        <button
+                          onClick={() => setPaymentMethod("CARD")}
+                          className={`flex-1 flex items-center justify-center py-2 text-xs font-bold rounded-md transition-all ${paymentMethod === "CARD" ? "bg-white text-[#C1272D] shadow-sm" : "text-[#4A4038] hover:text-[#000000]"}`}
+                        >
+                          Card
+                        </button>
+                        <button
+                          onClick={() => setPaymentMethod("GPAY")}
+                          className={`flex-1 flex items-center justify-center py-2 text-xs font-bold rounded-md transition-all ${paymentMethod === "GPAY" ? "bg-white text-[#C1272D] shadow-sm" : "text-[#4A4038] hover:text-[#000000]"}`}
+                        >
+                          GPay
+                        </button>
+                      </div>
                     </div>
 
-                    {/* Change Return */}
-                    {cashReceived > 0 && (
-                      <div className="flex justify-between items-center bg-white border border-black/10 rounded-lg p-3 text-xs">
-                        <span className="font-bold text-[#000000] uppercase tracking-[0.05em]">
-                          Change Return
-                        </span>
-                        <span
-                          className={`font-black text-sm ${cashReceived >= grandTotal ? "text-[#1A1A1A]" : "text-[#C1272D]"}`}
-                        >
-                          ₹
-                          {Math.max(
-                            0,
-                            cashReceived - grandTotal,
-                          ).toLocaleString(undefined, {
-                            minimumFractionDigits: 2,
-                          })}
-                        </span>
-                      </div>
+                    {paymentMethod === "CASH" && (
+                      <>
+                        <div className="bg-[#FFFFFF]/40 border border-black/10 rounded-xl p-4 mt-2">
+                          <div className="flex items-center justify-between mb-2.5">
+                            <label className="block text-[10px] font-bold text-[#000000]">
+                              Amount Received (₹)
+                            </label>
+                            <button
+                              onClick={() => setCashReceived(grandTotal)}
+                              className="text-[10px] font-bold text-[#C1272D] bg-[#C1272D]/10 px-2 py-1 rounded hover:bg-[#C1272D]/20 transition-colors"
+                            >
+                              Exact Amount
+                            </button>
+                          </div>
+                          <input
+                            type="number"
+                            className="w-full bg-white border border-black/10 focus:border-[#C1272D] rounded-lg px-3 py-2 text-base font-bold text-[#000000] placeholder:text-[#000000] focus:outline-none transition-colors"
+                            value={cashReceived || ""}
+                            onWheel={(e) => e.currentTarget.blur()}
+                            onChange={(e) =>
+                              setCashReceived(parseFloat(e.target.value) || 0)
+                            }
+                            placeholder="0.00"
+                          />
+                        </div>
+
+                        {/* Change Return */}
+                        {cashReceived > 0 && (
+                          <div className="flex justify-between items-center bg-white border border-black/10 rounded-lg p-3 text-xs mt-2">
+                            <span className="font-bold text-[#000000] uppercase tracking-[0.05em]">
+                              Change Return
+                            </span>
+                            <span
+                              className={`font-black text-sm ${cashReceived >= grandTotal ? "text-[#1A1A1A]" : "text-[#C1272D]"}`}
+                            >
+                              ₹
+                              {Math.max(
+                                0,
+                                cashReceived - grandTotal,
+                              ).toLocaleString(undefined, {
+                                minimumFractionDigits: 2,
+                              })}
+                            </span>
+                          </div>
+                        )}
+                      </>
                     )}
 
                     {/* Saved confirmation */}

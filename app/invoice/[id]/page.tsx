@@ -96,9 +96,9 @@ export default async function InvoicePage({
             <p className="text-base font-bold text-[#C1272D]">
               {order.customer_name || "Guest Customer"}
             </p>
-            {order.customer_phone && (
+            {order.customer_phone && order.customer_phone.split('_')[0] && (
               <p className="text-sm text-[#4A4038] font-semibold mt-1">
-                +91 {order.customer_phone}
+                +91 {order.customer_phone.split('_')[0]}
               </p>
             )}
           </div>
@@ -136,6 +136,16 @@ export default async function InvoicePage({
                 </span>
                 <span className="text-[#000000] font-black uppercase">
                   {order.source} SALE
+                </span>
+              </div>
+              <div className="flex gap-2">
+                <span className="text-[#6B5F52] font-bold w-12 text-left sm:text-right">
+                  Pay:
+                </span>
+                <span className="text-[#000000] font-black uppercase">
+                  {order.customer_phone?.includes("_")
+                    ? order.customer_phone.split("_")[1]
+                    : "CASH"}
                 </span>
               </div>
             </div>
